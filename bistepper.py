@@ -1,8 +1,11 @@
 from constant import *
-import GPIO
+import RPi.GPIO as GPIO
 import math
 import threading
 import time
+import wiringpi
+
+GPIO.setwarnings(False)
 
 
 class BiStepper:
@@ -65,9 +68,11 @@ class BiStepper:
         """
         h_thread = threading.Thread(target=self.rt,
                                     args=(
-                                        head, head_speed, CHECK_DIR,))
+                                        head, head_speed,))
         v_thread = threading.Thread(target=self.of,
                                     args=(valve, valve_speed,))
+        h_thread.start()
+        v_thread.start()
         h_thread.join()
         v_thread.join()
 
@@ -83,6 +88,8 @@ class BiStepper:
                                     name='headmove')
         v_thread = threading.Thread(target=self.valvehome, args=(valve_offset,),
                                     name='valvefollow')
+        h_thread.start()
+        v_thread.start()
         h_thread.join()
         v_thread.join()
 
@@ -108,7 +115,7 @@ class BiStepper:
         self.of(valve_offset)
         self.__init__(KEEP_DIR, "valve")
 
-    def rt(self, head, h_speed=HEAD_sV):
+    def rt(self, head, h_speed=HEAD_V):
         """Spin the head motor to the target position
 
         :param head: The target position of the head motor.
@@ -118,7 +125,7 @@ class BiStepper:
         self.headprepare(head, h_speed, CHECK_DIR)
         self.headmove()
 
-    def of(self, valve, v_speed=VALVE_sV):
+    def of(self, valve, v_speed=VALVE_V):
         """Spin the valve motor to the target position.
 
         :param valve: The target position of the valve motor.
@@ -133,12 +140,13 @@ class BiStepper:
 
         :return: None
         """
-        done = False
-        while ~done:
+
+        while True:
             pre_dir = self.head_dir
             if GPIO.input(HEAD_HOME) == MATCH:
+                print 'match'
                 self.head_dir = OPEN_DIR
-                self.head_step = self.angle2step(POS_COUNT * 2, HEAD_SLACK,
+                self.head_step = self.angle2step(HEAD_POS_COUNT * 2, HEAD_SLACK,
                                                  pre_dir == self.head_dir)
                 self.update_dir("head")
                 self.awake("head")
@@ -146,28 +154,31 @@ class BiStepper:
                     self.step("head", HEAD_V)
                 self.sleep("head")
             else:
+                print 'not match'
                 self.head_dir = CLOSE_DIR
                 self.update_dir("head")
                 self.awake("head")
                 while GPIO.input(HEAD_HOME) == NOT_MATCH:
                     self.step("head", HEAD_V)
-                self.head_step = self.angle2step(POS_COUNT, HEAD_SLACK)
+                print 'last steps'
+                self.head_step = self.angle2step(HEAD_POS_COUNT, HEAD_SLACK)
                 for i in range(self.head_step):
                     self.step("head", HEAD_V)
                 self.sleep("head")
-                done = True
+                break
 
     def valvestop(self):
         """Return valve motor home.
 
         :return: None
         """
-        done = False
-        while ~done:
+
+        while True:
             pre_dir = self.valve_dir
             if GPIO.input(VALVE_HOME) == MATCH:
                 self.valve_dir = OPEN_DIR
-                self.valve_step = self.angle2step(POS_COUNT * 2, VALVE_SLACK,
+                self.valve_step = self.angle2step(VALVE_POS_COUNT * 2,
+                                                  VALVE_SLACK,
                                                   pre_dir == self.valve_dir)
                 self.update_dir("valve")
                 self.awake("valve")
@@ -180,13 +191,13 @@ class BiStepper:
                 self.awake("valve")
                 while GPIO.input(VALVE_HOME) == NOT_MATCH:
                     self.step("valve", VALVE_V)
-                self.valve_step = self.angle2step(POS_COUNT, VALVE_SLACK)
+                self.valve_step = self.angle2step(VALVE_POS_COUNT, VALVE_SLACK)
                 for i in range(self.valve_step):
                     self.step("valve", VALVE_V)
                 self.sleep("valve")
-                done = True
+                break
 
-    def headprepare(self, head, h_speed, dir_check=NOT_CHECK_DIR):
+    def headprepare(self, head, h_speed, dir_check=CHECK_DIR):
         """Calculate the direction, step, speed for the head motor.
 
         :param head: Target position of the head motor.
@@ -194,28 +205,33 @@ class BiStepper:
         :param dir_check: Whether to select the shortest path.
         :return: None
         """
-        if head != self.head_pos:
-            self.head_state = RUNNING
-            self.head_target = head
-            self.head_step = head - self.head_pos
-            pre_dir = self.head_dir
-            if dir_check:
-                if self.head_step < 0:
-                    self.head_dir = CLOCKWISE
-                    self.head_step = -self.head_step
-                else:
-                    self.head_dir = COUNTERCLOCKWISE
+
+        self.head_state = RUNNING
+        self.head_target = head
+        self.head_step = head - self.head_pos
+        pre_dir = self.head_dir
+        if dir_check:
+            if self.head_step < -180:
+                self.head_dir = OPEN_DIR
+                self.head_step = 360 + self.head_step
+            elif self.head_step < 0:
+                self.head_dir = CLOSE_DIR
+                self.head_step = -self.head_step
+            elif self.head_step < 180:
+                self.head_dir = OPEN_DIR
             else:
-                self.head_dir = COUNTERCLOCKWISE
-                if self.head_step < 0:
-                    self.head_step += 360
-            if pre_dir == self.head_dir:
-                self.update_dir("head")
-            self.head_step = self.angle2step(self.head_step,
-                                             HEAD_SLACK,
-                                             pre_dir == self.head_dir)
-            self.head_v = max(HEAD_sV - math.floor(
-                self.head_step / 2) * HEAD_Ramp, h_speed)
+                self.head_dir = CLOSE_DIR
+                self.head_step = 360 - self.head_step
+        else:
+            self.head_dir = OPEN_DIR
+            if self.head_step < 0:
+                self.head_step += 360
+        self.update_dir("head")
+        self.head_step = self.angle2step(self.head_step,
+                                         HEAD_SLACK,
+                                         pre_dir == self.head_dir)
+        self.head_v = max(HEAD_sV - math.floor(
+            self.head_step / 2) * HEAD_Ramp, h_speed)
 
     def valveprepare(self, valve, v_speed):
         """Calculate the direction, step, speed for hte valve motor.
@@ -224,38 +240,37 @@ class BiStepper:
         :param v_speed: The target speed of the valve motor.
         :return: None
         """
-        if valve != self.valve_pos:
-            self.valve_state = RUNNING
-            self.valve_target = valve
-            self.valve_step = abs(valve - self.valve_pos)
-            pre_dir = self.valve_dir
-            if valve > self.valve_pos:
-                self.valve_dir = OPEN_DIR
-            else:
-                self.valve_dir = CLOSE_DIR
-            if pre_dir == self.valve_dir:
-                self.update_dir("valve")
-            self.valve_step = self.angle2step(self.valve_step,
-                                              VALVE_SLACK,
-                                              pre_dir == self.valve_dir)
-            self.valve_v = max(VALVE_sV - math.floor(
-                self.valve_step / 2) * VALVE_Ramp, v_speed)
+        self.valve_state = RUNNING
+        self.valve_target = valve
+        self.valve_step = abs(valve - self.valve_pos)
+        pre_dir = self.valve_dir
+        if valve >= self.valve_pos:
+            self.valve_dir = OPEN_DIR
+        else:
+            self.valve_dir = CLOSE_DIR
+        self.update_dir("valve")
+        self.valve_step = self.angle2step(self.valve_step,
+                                          VALVE_SLACK,
+                                          pre_dir == self.valve_dir)
+        self.valve_v = max(VALVE_sV - math.floor(
+            self.valve_step / 2) * VALVE_Ramp, v_speed)
 
     def headmove(self):
         """Move the head motor to the target position.
 
         :return: None
         """
+        ramp_start = (HEAD_sV - self.head_v) / HEAD_Ramp
+        ramp_stop = self.head_step - ramp_start
         self.awake("head")
         v = HEAD_sV
-        step = 0
-        for i in range(self.head_step):
+        for step in range(self.head_step):
             self.step("head", v)
-            if step * 2 < self.head_step and v > self.head_v:
-                v = max(v - HEAD_Ramp, self.head_v)
-            elif step * 2 > self.head_step and v < HEAD_sV:
-                v = min(v + HEAD_Ramp, HEAD_sV)
-            self.head_degree = int(math.floor(i / STEP_PER_ANGLE))
+            if step < ramp_start:
+                v = v - HEAD_Ramp
+            elif step >= ramp_stop:
+                v = v + 1
+            self.head_degree = int(math.floor(step / STEP_PER_ANGLE))
         self.sleep("head")
         self.head_pos = self.head_target
         self.head_degree = 0
@@ -266,15 +281,16 @@ class BiStepper:
 
         :return: None
         """
+        ramp_start = (VALVE_sV - self.valve_v) / VALVE_Ramp
+        ramp_stop = self.valve_step - ramp_start
         self.awake("valve")
         v = VALVE_sV
-        step = 0
-        for i in range(self.valve_step):
+        for step in range(self.valve_step):
             self.step("valve", v)
-            if step * 2 < self.valve_step and v > self.valve_v:
-                v = max(v - VALVE_Ramp, self.valve_v)
-            elif step * 2 > self.valve_step and v < VALVE_sV:
-                v = min(v + VALVE_Ramp, VALVE_sV)
+            if step < ramp_start:
+                v = v - HEAD_Ramp
+            elif step >= ramp_stop:
+                v = v + 1
         self.sleep("valve")
         self.valve_pos = self.valve_target
         self.valve_state = IDLE
@@ -311,21 +327,24 @@ class BiStepper:
         :return: None
         """
         GPIO.setmode(GPIO.BOARD)
-        GPIO.setmode("GENERAL MODE")
         GPIO.setup(HEAD_DIR, GPIO.OUT)
         GPIO.setup(HEAD_STEP, GPIO.OUT)
         GPIO.setup(HEAD_HOME, GPIO.IN, GPIO.PUD_DOWN)
+        GPIO.setup(HEAD_SLEEP, GPIO.OUT)
         GPIO.setup(VALVE_DIR, GPIO.OUT)
         GPIO.setup(VALVE_STEP, GPIO.OUT)
         GPIO.setup(VALVE_HOME, GPIO.IN, GPIO.PUD_DOWN)
+        GPIO.setup(VALVE_SLEEP, GPIO.OUT)
 
         GPIO.output(HEAD_DIR, COUNTERCLOCKWISE)
         GPIO.output(HEAD_STEP, GPIO.LOW)
+        GPIO.output(HEAD_SLEEP, GPIO.HIGH)
         GPIO.output(VALVE_DIR, COUNTERCLOCKWISE)
         GPIO.output(VALVE_STEP, GPIO.LOW)
+        GPIO.output(VALVE_SLEEP, GPIO.HIGH)
 
     @staticmethod
-    def angle2step(angle, slack, dir_change=False):
+    def angle2step(angle, slack, dir_change=True):
         """Transfer angle value to step value.
 
         :param angle: Target angle value
@@ -333,7 +352,8 @@ class BiStepper:
         :param dir_change: Whether the direction is changed.
         :return: Target step value.
         """
-        return int(abs(angle * GEARRATIO * ADJUSTMENT)) + dir_change * slack
+        return int(
+            abs((angle + (not dir_change) * slack) * GEARRATIO * ADJUSTMENT))
 
     @staticmethod
     def awake(motor):
@@ -343,9 +363,9 @@ class BiStepper:
         :return: None
         """
         if motor == "head":
-            GPIO.output(HEAD_SLEEP, GPIO.HIGH)
+            GPIO.output(HEAD_SLEEP, GPIO.LOW)
         else:
-            GPIO.output(VALVE_SLEEP, GPIO.HIGH)
+            GPIO.output(VALVE_SLEEP, GPIO.LOW)
 
     @staticmethod
     def sleep(motor):
@@ -355,9 +375,9 @@ class BiStepper:
         :return: None
         """
         if motor == "head":
-            GPIO.output(HEAD_SLEEP, GPIO.LOW)
+            GPIO.output(HEAD_SLEEP, GPIO.HIGH)
         else:
-            GPIO.output(VALVE_SLEEP, GPIO.LOW)
+            GPIO.output(VALVE_SLEEP, GPIO.HIGH)
 
     @staticmethod
     def step(motor, delay):
@@ -369,11 +389,11 @@ class BiStepper:
         """
         if motor == "head":
             GPIO.output(HEAD_STEP, GPIO.HIGH)
-            time.sleep(delay)
+            wiringpi.delayMicroseconds(delay)
             GPIO.output(HEAD_STEP, GPIO.LOW)
-            time.sleep(delay)
+            wiringpi.delayMicroseconds(delay)
         else:
             GPIO.output(VALVE_STEP, GPIO.HIGH)
-            time.sleep(delay)
+            wiringpi.delayMicroseconds(delay)
             GPIO.output(VALVE_STEP, GPIO.LOW)
-            time.sleep(delay)
+            wiringpi.delayMicroseconds(delay)
